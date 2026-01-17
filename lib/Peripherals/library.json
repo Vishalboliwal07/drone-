@@ -1,0 +1,10 @@
+{
+  "name": "Peripherals",
+  "version": "1.0.0",
+  "description": "Drone peripheral utilities",
+  "export": {
+    "include": ["src", "lib_motor.h"]
+  },
+  "frameworks": "*",
+  "platforms": "*"
+}
