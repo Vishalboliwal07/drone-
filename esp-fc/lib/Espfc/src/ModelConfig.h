@@ -9,7 +9,7 @@
 #include "Device/MagDevice.h"
 #include "Device/BaroDevice.h"
 #include "Device/SerialDevice.h"
-#include "Device/InputPPM.h"
+#include "Device/InputEspNow.h"
 #include "Output/Mixers.h"
 #include "Control/Pid.h"
 
@@ -412,8 +412,8 @@ struct InputChannelConfig
 
 struct InputConfig
 {
-  int8_t ppmMode = PPM_MODE_NORMAL;
-  uint8_t serialRxProvider = SERIALRX_SBUS;
+   int8_t ppmMode = 0;
+   uint8_t serialRxProvider = 0;
 
   int16_t minCheck = 1050;
   int16_t maxCheck = 1900;
