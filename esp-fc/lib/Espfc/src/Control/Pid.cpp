@@ -52,7 +52,7 @@ float FAST_CODE_ATTR Pid::update(float setpoint, float measurement)
         if(!incrementOnly || increasing) iTermError *= itermRelaxFactor;
       }
       iTerm += Ki * iScale * iTermError * dt;
-      iTerm = std::clamp(iTerm, iLimitLow, iLimitHigh);
+      iTerm =Espfc::Utils::clamp(iTerm, iLimitLow, iLimitHigh);
     }
   }
   else
@@ -96,7 +96,7 @@ float FAST_CODE_ATTR Pid::update(float setpoint, float measurement)
   prevError = error;
   prevSetpoint = setpoint;
 
-  return std::clamp(pTerm + iTerm + dTerm + fTerm, oLimitLow, oLimitHigh);
+  return Espfc::Utils::clamp(pTerm + iTerm + dTerm + fTerm, oLimitLow, oLimitHigh);
 }
 
 }

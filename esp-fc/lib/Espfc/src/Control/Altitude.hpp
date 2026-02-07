@@ -28,10 +28,10 @@ public:
 
     if(_model.config.debug.mode == DEBUG_ALTITUDE)
     {
-      _model.state.debug[0] = std::clamp(lrintf(_model.state.baro.altitudeGround * 100.0f), -32000l, 32000l);  // gps trust
-      _model.state.debug[1] = std::clamp(lrintf(_model.state.baro.vario * 100.0f), -32000l, 32000l);           // baroAlt cm
-      _model.state.debug[2] = std::clamp(lrintf(_model.state.altitude.height * 100.0f), -32000l, 32000l);      // gpsAlt cm
-      _model.state.debug[3] = std::clamp(lrintf(_model.state.altitude.vario * 100.0f), -32000l, 32000l);       // vario
+      _model.state.debug[0] = Espfc::Utils::clamp(lrintf(_model.state.baro.altitudeGround * 100.0f), -32000l, 32000l);  // gps trust
+      _model.state.debug[1] = Espfc::Utils::clamp(lrintf(_model.state.baro.vario * 100.0f), -32000l, 32000l);           // baroAlt cm
+      _model.state.debug[2] = Espfc::Utils::clamp(lrintf(_model.state.altitude.height * 100.0f), -32000l, 32000l);      // gpsAlt cm
+      _model.state.debug[3] = Espfc::Utils::clamp(lrintf(_model.state.altitude.vario * 100.0f), -32000l, 32000l);       // vario
     }
 
     return 1;

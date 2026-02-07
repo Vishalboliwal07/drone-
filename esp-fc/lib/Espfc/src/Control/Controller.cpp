@@ -186,14 +186,14 @@ void FAST_CODE_ATTR Controller::innerLoop()
 
   if(_model.config.debug.mode == DEBUG_STACK)
   {
-    _model.state.debug[0] = std::clamp(lrintf(_model.state.setpoint.rate[AXIS_THRUST] * 1000.0f), -3000l, 3000l);   // stack hi mem
-    _model.state.debug[1] = std::clamp(lrintf(_model.state.altitude.vario * 1000.0f), -30000l, 30000l);             // stack lo mem
-    _model.state.debug[2] = std::clamp(lrintf(_model.state.altitude.height * 100.0f), -30000l, 30000l);             // stack curr
-    _model.state.debug[3] = std::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].error * 1000.0f), -30000l, 30000l); // stack p
-    _model.state.debug[4] = std::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].pTerm * 1000.0f), -3000l, 3000l);
-    _model.state.debug[5] = std::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].iTerm * 1000.0f), -3000l, 3000l);
-    _model.state.debug[6] = std::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].dTerm * 1000.0f), -3000l, 3000l);
-    _model.state.debug[7] = std::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].fTerm * 1000.0f), -3000l, 3000l);
+    _model.state.debug[0] =Espfc::Utils::clamp(lrintf(_model.state.setpoint.rate[AXIS_THRUST] * 1000.0f), -3000l, 3000l);   // stack hi mem
+    _model.state.debug[1] =Espfc::Utils::clamp(lrintf(_model.state.altitude.vario * 1000.0f), -30000l, 30000l);             // stack lo mem
+    _model.state.debug[2] =Espfc::Utils::clamp(lrintf(_model.state.altitude.height * 100.0f), -30000l, 30000l);             // stack curr
+    _model.state.debug[3] =Espfc::Utils::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].error * 1000.0f), -30000l, 30000l); // stack p
+    _model.state.debug[4] =Espfc::Utils::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].pTerm * 1000.0f), -3000l, 3000l);
+    _model.state.debug[5] =Espfc::Utils::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].iTerm * 1000.0f), -3000l, 3000l);
+    _model.state.debug[6] =Espfc::Utils::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].dTerm * 1000.0f), -3000l, 3000l);
+    _model.state.debug[7] =Espfc::Utils::clamp(lrintf(_model.state.innerPid[AXIS_THRUST].fTerm * 1000.0f), -3000l, 3000l);
   }
 
   // debug
@@ -309,8 +309,8 @@ void Controller::beginOuterLoop(size_t axis)
 
 void Controller::beginAltHold()
 {
-  float itermCenter = std::clamp((int)_model.config.altHold.itermCenter, 10, 60) * 0.01f;
-  float itermRange = itermCenter * std::clamp((int)_model.config.altHold.itermRange, 10, 60) * 0.01f;
+  float itermCenter =Espfc::Utils::clamp((int)_model.config.altHold.itermCenter, 10, 60) * 0.01f;
+  float itermRange = itermCenter *Espfc::Utils::clamp((int)_model.config.altHold.itermRange, 10, 60) * 0.01f;
   PidConfig& pc = _model.config.pid[FC_PID_VEL];
   Pid& pid = _model.state.innerPid[AXIS_THRUST];
   pid.Kp = (float)pc.P * VEL_PTERM_SCALE;

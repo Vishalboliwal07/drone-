@@ -155,7 +155,8 @@ class GyroLSM6DSO: public GyroDevice
       uint8_t whoami = 0;
       _bus->readByte(_addr, LSM6DSO_REG_WHO_AM_I, &whoami);
       //D("lsm6dso:whoami", _addr, whoami);
-      return whoami == 0x6C || whoami == 0x69;
+      // return whoami == 0x6C || whoami == 0x69;
+      return whoami == 0x6C || whoami == 0x69 || whoami == 0x6A;
     }
 };
 
