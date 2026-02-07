@@ -1,0 +1,17 @@
+{
+  "name": "Utilities",
+  "version": "1.0.0",
+  "description": "Drone firmware utilities",
+  "export": {
+    "include": [
+      "src",
+      "lib_droneFunctions.h",
+      "lib_droneConstants.h",
+      "lib_utilities.h",
+      "lib_globalConstants.h",
+      "lib_functions.h"
+    ]
+  },
+  "frameworks": "*",
+  "platforms": "*"
+}
