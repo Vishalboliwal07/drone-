@@ -1,4 +1,4 @@
-# drone
+# Drone
 
 # 🚁 ESP32 Custom Flight Controller & Remote (ESP-NOW)
 
