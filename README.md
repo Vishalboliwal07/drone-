@@ -1,4 +1,7 @@
 # Drone
+![Alternative Text](img/1769604544096.jpg)
+![Alternative Text](img/1769604541519.jpg)
+
 
 # 🚁 ESP32 Custom Flight Controller & Remote (ESP-NOW)
 
