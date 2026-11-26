@@ -4,6 +4,7 @@ class PidController {
  public:
   void configure(float kp, float ki, float kd, float feedForward);
   void reset();
+  void resetIntegral();
   float update(float setpoint, float measurement, float dtSeconds,
                float throttle, float derivativeCutoffHz = 60.0f);
 

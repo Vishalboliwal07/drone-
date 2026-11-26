@@ -3,8 +3,8 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <SimpleKalmanFilter.h>
+#include <Wire.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
 #include <cmath>
 #include <cstring>
 
@@ -53,14 +53,13 @@ SimpleKalmanFilter roll_filter(0.1, 0.1, 0.01);
 SimpleKalmanFilter pressureKalman(2, 2, 0.08);
 
 typedef struct { float rollAngle, pitchAngle, yawAngle; } Orientation;
-typedef struct State { volatile bool armed; volatile bool calibrating; volatile bool safetyLatched; volatile int throttle; volatile int pitch; volatile int roll; volatile int yaw; } State;
+typedef struct State { volatile bool armed; volatile bool calibrating; volatile int throttle; volatile int pitch; volatile int roll; volatile int yaw; } State;
 
 CommandPacket incomingData;
 State state;
 Orientation orientation = {0.0, 0.0, 0.0};
 PidController rollPID, pitchPID, yawPID, altPID;
 MotorOutput motors;
-QueueHandle_t commandQueue = nullptr;
 
 float accelBiasX=0, accelBiasY=0, accelBiasZ=0;
 float gyroBiasX=0, gyroBiasY=0, gyroBiasZ=0;
@@ -69,7 +68,6 @@ float dt=0.005;
 unsigned long lastRecvTime = 0;
 unsigned long ledTimer = 0;
 bool ledState = false;
-volatile bool shutdownRequested = false;
 
 float groundReferenceAlt = 0;
 float filteredAltitude = 0;
@@ -79,30 +77,34 @@ int lastThrottleReading = 0;
 
 // ================= CALLBACK =================
 void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *incomingDataPtr, int len) {
-    (void)info;
-    if (incomingDataPtr == nullptr || len != static_cast<int>(sizeof(incomingData))) return;
-    CommandPacket packet{};
-    memcpy(&packet, incomingDataPtr, sizeof(packet));
-    if (packet.throttle < 0 || packet.throttle > 1000 ||
-        packet.yaw < -200 || packet.yaw > 200 ||
-        packet.pitch < -200 || packet.pitch > 200 ||
-        packet.roll < -200 || packet.roll > 200 ||
-        (packet.flightMode != 0 && packet.flightMode != 1 && packet.flightMode != 99)) return;
-    if (commandQueue != nullptr) xQueueOverwrite(commandQueue, &packet);
+    memcpy(&incomingData, incomingDataPtr, sizeof(incomingData));
+    state.throttle = incomingData.throttle;
+    state.yaw      = incomingData.yaw;
+    state.pitch    = incomingData.pitch;
+    state.roll     = incomingData.roll;
+
+    if (incomingData.flightMode == 99) {
+        digitalWrite(PIN_POWER_LATCH, LOW);
+        while(1);
+    }
+
+    if (!incomingData.armed) state.armed = false;
+    else state.armed = true;
+    lastRecvTime = millis();
 }
 
 // ================= HELPERS =================
-bool setupESPNow() {
+void setupESPNow() {
     WiFi.mode(WIFI_STA);
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);
-    if (esp_now_init() != ESP_OK) return false;
-    return esp_now_register_recv_cb(OnDataRecv) == ESP_OK;
+    if (esp_now_init() != ESP_OK) return;
+    esp_now_register_recv_cb(OnDataRecv);
 }
 
 float expoMovingAverage(float current, float previous, float alpha = 0.3464) { return alpha * previous + (1 - alpha) * current; }
-bool setupMotors() { return motors.begin(); }
+void setupMotors() { motors.begin(); }
 
 void flightTask(void *p) {
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -110,26 +112,16 @@ void flightTask(void *p) {
     
     // --- IMU CALIBRATION ---
     float accSumX=0, accSumY=0, accSumZ=0;
-    uint16_t imuSamples = 0;
     for (int i=0; i<300; i++) { 
         SensorReadings readings{};
         if (sensors.read(readings)) {
             gyroBiasX += readings.gyroX; gyroBiasY += readings.gyroY; gyroBiasZ += readings.gyroZ;
             accSumX += readings.accelX; accSumY += readings.accelY; accSumZ += readings.accelZ;
-            ++imuSamples;
         }
         vTaskDelay(2);
     }
-    if (imuSamples < 270) {
-        state.safetyLatched = true;
-        state.calibrating = false;
-        motors.stop();
-        Serial.println("IMU calibration failed; motors remain stopped.");
-        vTaskDelete(nullptr);
-        return;
-    }
-    gyroBiasX/=imuSamples; gyroBiasY/=imuSamples; gyroBiasZ/=imuSamples;
-    accSumX/=imuSamples; accSumY/=imuSamples; accSumZ/=imuSamples;
+    gyroBiasX/=300.0; gyroBiasY/=300.0; gyroBiasZ/=300.0;
+    accSumX/=300.0; accSumY/=300.0; accSumZ/=300.0;
     pitchOffsetDeg = atan2f(-accSumX, sqrtf(accSumY*accSumY + accSumZ*accSumZ)) * 57.2958f;
     rollOffsetDeg  = atanf(accSumY / accSumZ) * 57.2958f;   
     
@@ -139,24 +131,11 @@ void flightTask(void *p) {
         sensors.altitudeMeters(SEALEVEL_PRESSURE_HPA);
         vTaskDelay(10);
     }
-    uint16_t barometerSamples = 0;
     for(int i=0; i<100; i++) {
-        const float altitude = sensors.altitudeMeters(SEALEVEL_PRESSURE_HPA);
-        if (std::isfinite(altitude)) {
-            pressSum += altitude;
-            ++barometerSamples;
-        }
+        pressSum += sensors.altitudeMeters(SEALEVEL_PRESSURE_HPA);
         vTaskDelay(10);
     }
-    if (barometerSamples < 80) {
-        state.safetyLatched = true;
-        state.calibrating = false;
-        motors.stop();
-        Serial.println("Barometer calibration failed; motors remain stopped.");
-        vTaskDelete(nullptr);
-        return;
-    }
-    groundReferenceAlt = pressSum / barometerSamples;
+    groundReferenceAlt = pressSum / 100.0f;
     
     state.calibrating = false;
 
@@ -173,44 +152,13 @@ void flightTask(void *p) {
     float accelRoll_prev=0, accelPitch_prev=0;
 
     while (1) {
-        CommandPacket receivedPacket{};
-        if (xQueueReceive(commandQueue, &receivedPacket, 0) == pdTRUE) {
-            incomingData = receivedPacket;
-            state.throttle = incomingData.throttle;
-            state.yaw = incomingData.yaw;
-            state.pitch = incomingData.pitch;
-            state.roll = incomingData.roll;
-            lastRecvTime = millis();
-            if (incomingData.flightMode == 99) {
-                shutdownRequested = true;
-                state.armed = false;
-            } else if (!incomingData.armed) {
-                state.armed = false;
-                state.safetyLatched = false;
-            } else if (!state.safetyLatched && !state.armed && state.throttle <= 50) {
-                state.armed = true;
-            }
-        }
         time_now = micros();
         dt = (time_now - time_prev) / 1000000.0f;
         time_prev = time_now;
-        if (!std::isfinite(dt) || dt < 0.0025f || dt > 0.02f) dt = 0.005f;
+        if (dt > 0.1f) dt = 0.005f;
         
-        if (shutdownRequested) {
-            state.armed = false;
-            motors.stop();
-            digitalWrite(PIN_POWER_LATCH, LOW);
-            vTaskSuspend(nullptr);
-        }
-        if (millis() - lastRecvTime > 1000) {
-            state.armed = false;
-            state.safetyLatched = true;
-        }
-        if (lastRecvTime > 0 && millis() - lastRecvTime > 60000) {
-            motors.stop();
-            digitalWrite(PIN_POWER_LATCH, LOW);
-            vTaskSuspend(nullptr);
-        }
+        if (millis() - lastRecvTime > 60000) { digitalWrite(PIN_POWER_LATCH, LOW); }
+        if (millis() - lastRecvTime > 1000) state.armed = false;
 
         SensorReadings readings{};
         if (sensors.read(readings)) {
@@ -242,28 +190,13 @@ void flightTask(void *p) {
             orientation.rollAngle  = alpha * (orientation.rollAngle + k_gx * dt) + (1.0f - alpha) * k_accRoll;
             orientation.pitchAngle = alpha * (orientation.pitchAngle + k_gy * dt) + (1.0f - alpha) * k_accPitch;
 
-            if (fabsf(orientation.rollAngle) > 75.0f || fabsf(orientation.pitchAngle) > 75.0f) {
+            if (abs(orientation.rollAngle) > 75.0 || abs(orientation.pitchAngle) > 75.0) {
                 state.armed = false;
-                state.safetyLatched = true;
             }
 
             // --- ALTITUDE LOGIC ---
             float absAlt = sensors.altitudeMeters(SEALEVEL_PRESSURE_HPA);
-            if (!std::isfinite(absAlt)) {
-                state.armed = false;
-                state.safetyLatched = true;
-                motors.stop();
-                vTaskDelayUntil(&xLastTick, pdMS_TO_TICKS(5));
-                continue;
-            }
             filteredAltitude = pressureKalman.updateEstimate(absAlt - groundReferenceAlt);
-            if (!std::isfinite(filteredAltitude)) {
-                state.armed = false;
-                state.safetyLatched = true;
-                motors.stop();
-                vTaskDelayUntil(&xLastTick, pdMS_TO_TICKS(5));
-                continue;
-            }
             
             if (abs(state.throttle - lastThrottleReading) < 20) {
                 if (!altitudeHoldActive && state.throttle > 200) { 
@@ -285,7 +218,7 @@ void flightTask(void *p) {
                 altPID_Output = altPID.update(targetAltitude, filteredAltitude, dt, state.throttle);
                 altPID_Output = constrain(altPID_Output, -200, 200); 
             } else {
-                altPID.reset();
+                altPID.resetIntegral();
                 altPID_Output = 0;
             }
             // ---------------------
@@ -310,9 +243,9 @@ void flightTask(void *p) {
                 pitchOut = 0;
                 yawOut = 0;
                 // Important: Reset I-terms so they don't accumulate on ground
-                rollPID.reset();
-                pitchPID.reset();
-                yawPID.reset();
+                rollPID.resetIntegral();
+                pitchPID.resetIntegral();
+                yawPID.resetIntegral();
             }
             // 2. HIGH THROTTLE ATTENUATION (Above 80% -> 800)
             // Scales from 100% PID strength at 800 throttle to 80% PID strength at 1000 throttle
@@ -335,11 +268,8 @@ void flightTask(void *p) {
             basePulse += (int)altPID_Output;
             
             motors.write(basePulse, rollOut, pitchOut, yawOut, state.armed,
-                         state.calibrating, incomingData.flightMode, incomingData.yawBias);
-        } else {
-            state.armed = false;
-            state.safetyLatched = true;
-            motors.stop();
+                         state.calibrating, incomingData.flightMode, incomingData.yawBias,
+                         TRIM_FL, TRIM_FR, TRIM_RL, TRIM_RR);
         }
         vTaskDelayUntil(&xLastTick, pdMS_TO_TICKS(5));
     }
@@ -354,29 +284,8 @@ void flightControllerSetup() {
     pinMode(21, INPUT_PULLUP); pinMode(22, OUTPUT);
     for(int i=0; i<8; i++) { digitalWrite(22, LOW); delayMicroseconds(5); digitalWrite(22, HIGH); delayMicroseconds(5); }
     pinMode(22, INPUT);
-    if (!setupMotors()) {
-        Serial.println("Motor PWM initialization failed; motors remain stopped.");
-        motors.stop();
-        return;
-    }
-    if (!sensors.begin()) {
-        Serial.println("IMU or barometer initialization failed; motors remain stopped.");
-        state.safetyLatched = true;
-        return;
-    }
-    commandQueue = xQueueCreate(1, sizeof(CommandPacket));
-    if (commandQueue == nullptr) {
-        Serial.println("Command queue allocation failed; motors remain stopped.");
-        state.safetyLatched = true;
-        motors.stop();
-        return;
-    }
-    if (!setupESPNow()) {
-        Serial.println("ESP-NOW initialization failed; motors remain stopped.");
-        state.safetyLatched = true;
-        motors.stop();
-        return;
-    }
+    Wire.begin(); Wire.setTimeOut(3000);
+    setupMotors(); sensors.begin(); setupESPNow();
     Serial.println("System Ready.");
     xTaskCreatePinnedToCore(flightTask, "FlightTask", 20480, NULL, 5, NULL, 1);
 }

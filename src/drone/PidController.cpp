@@ -12,14 +12,19 @@ void PidController::configure(float kp, float ki, float kd, float feedForward) {
 }
 
 void PidController::reset() {
-  _integral = 0.0f;
+  resetIntegral();
   _previousMeasurement = 0.0f;
   _filteredDerivative = 0.0f;
 }
 
+void PidController::resetIntegral() {
+  _integral = 0.0f;
+}
+
 float PidController::update(float setpoint, float measurement, float dtSeconds,
                             float throttle, float derivativeCutoffHz) {
-  const float dt = (dtSeconds > 0.0f && std::isfinite(dtSeconds)) ? dtSeconds : 0.005f;
+  float dt = dtSeconds;
+  if (dt <= 0.0f) dt = 0.005f;
   const float error = setpoint - measurement;
 
   if (throttle > 50.0f) {

@@ -1,6 +1,6 @@
 # ESP32 Drone Firmware
 
-This project contains separate firmware for the drone receiver and its ESP-NOW remote controller. The receiver uses the NABHYAN WROOM board pinout documented in the included manual.
+This project contains separate firmware for the drone receiver and its ESP-NOW remote controller. The receiver uses the NABHYAN WROOM board pinout documented in the manual supplied with the original workspace.
 
 ## Build
 
@@ -37,6 +37,8 @@ esp-fc-master/                      Reference flight-controller project
 The receiver uses GPIO12/13/14/15 for motors FL/RL/RR/FR, GPIO4 for the power latch, GPIO18/19 for status LEDs, and I²C on GPIO21/22. The firmware expects an LSM6DS3TR-C at address `0x6A` and a BMP280 at `0x76`.
 
 The transmitter source currently uses the pin assignments and button actions in the original project README. Those do not fully match the transmitter map in the NABHYAN manual supplied for this review. Read [the firmware review](docs/firmware-review.md) and confirm the PCB version before uploading controller firmware.
+
+The receiver/controller behavior is carried over from the original source. This reorganization does not address the logic issues listed in the review.
 
 ## Safety and known limitations
 

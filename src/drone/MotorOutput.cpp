@@ -15,12 +15,7 @@ constexpr uint8_t motorPins[] = {
 }
 
 uint32_t MotorOutput::pulseToDuty(int pulseWidthUs) {
-  const uint32_t periodUs = 1000000UL / drone::board::pwmFrequencyHz;
-  const uint32_t maxDuty = (1UL << drone::board::pwmResolutionBits) - 1UL;
-  const int boundedPulse = std::clamp(pulseWidthUs,
-                                      static_cast<int>(drone::board::minPulseUs),
-                                      static_cast<int>(drone::board::maxPulseUs));
-  return static_cast<uint32_t>((static_cast<uint64_t>(boundedPulse) * maxDuty) / periodUs);
+  return (pulseWidthUs * 1024) / 2404;
 }
 
 bool MotorOutput::begin() {
@@ -40,7 +35,9 @@ void MotorOutput::stop() {
 }
 
 void MotorOutput::write(int basePulseUs, float roll, float pitch, float yaw,
-                        bool armed, bool calibrating, int flightMode, int yawBias) {
+                        bool armed, bool calibrating, int flightMode, int yawBias,
+                        int trimFrontLeftUs, int trimFrontRightUs,
+                        int trimRearLeftUs, int trimRearRightUs) {
   if (!armed || calibrating) {
     stop();
     return;
@@ -51,27 +48,27 @@ void MotorOutput::write(int basePulseUs, float roll, float pitch, float yaw,
   int rearLeft;
   int rearRight;
   if (flightMode == 0) {
-    frontLeft = basePulseUs + static_cast<int>(roll - pitch - yaw);
-    frontRight = basePulseUs + static_cast<int>(-roll - pitch + yaw);
-    rearLeft = basePulseUs + static_cast<int>(roll + pitch + yaw);
-    rearRight = basePulseUs + static_cast<int>(-roll + pitch - yaw);
+    frontLeft = basePulseUs + roll - pitch - yaw;
+    frontRight = basePulseUs - roll - pitch + yaw;
+    rearLeft = basePulseUs + roll + pitch + yaw;
+    rearRight = basePulseUs - roll + pitch - yaw;
   } else {
     const float correctedYaw = yaw + yawBias;
-    const int yawFrontLeft = correctedYaw < 0.0f ? static_cast<int>(-correctedYaw) : 0;
-    const int yawFrontRight = correctedYaw > 0.0f ? static_cast<int>(correctedYaw) : 0;
-    const int yawRearLeft = correctedYaw > 0.0f ? static_cast<int>(correctedYaw) : 0;
-    const int yawRearRight = correctedYaw < 0.0f ? static_cast<int>(-correctedYaw) : 0;
-    frontLeft = basePulseUs + static_cast<int>(roll - pitch) + yawFrontLeft;
-    frontRight = basePulseUs + static_cast<int>(-roll - pitch) + yawFrontRight;
-    rearLeft = basePulseUs + static_cast<int>(roll + pitch) + yawRearLeft;
-    rearRight = basePulseUs + static_cast<int>(-roll + pitch) + yawRearRight;
+    const float yawFrontLeft = correctedYaw < 0.0f ? -correctedYaw : 0.0f;
+    const float yawFrontRight = correctedYaw > 0.0f ? correctedYaw : 0.0f;
+    const float yawRearLeft = correctedYaw > 0.0f ? correctedYaw : 0.0f;
+    const float yawRearRight = correctedYaw < 0.0f ? -correctedYaw : 0.0f;
+    frontLeft = basePulseUs + roll - pitch + yawFrontLeft;
+    frontRight = basePulseUs - roll - pitch + yawFrontRight;
+    rearLeft = basePulseUs + roll + pitch + yawRearLeft;
+    rearRight = basePulseUs - roll + pitch + yawRearRight;
   }
 
   const int outputs[] = {
-      frontLeft + drone::board::trimFrontLeftUs,
-      frontRight + drone::board::trimFrontRightUs,
-      rearLeft + drone::board::trimRearLeftUs,
-      rearRight + drone::board::trimRearRightUs,
+      frontLeft + trimFrontLeftUs,
+      frontRight + trimFrontRightUs,
+      rearLeft + trimRearLeftUs,
+      rearRight + trimRearRightUs,
   };
   for (size_t i = 0; i < 4; ++i) {
     const int bounded = std::clamp(outputs[i], static_cast<int>(drone::board::minPulseUs),

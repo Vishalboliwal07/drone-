@@ -264,10 +264,7 @@ void controllerLoop() {
 
     bool currentBtnState = digitalRead(PIN_ARM);
     if (lastArmBtnState == HIGH && currentBtnState == LOW) {
-        if (isArmed || myData.throttle <= 50) {
-            isArmed = !isArmed;
-            digitalWrite(PIN_BUZZER, HIGH); delay(50); digitalWrite(PIN_BUZZER, LOW);
-        }
+        isArmed = !isArmed; digitalWrite(PIN_BUZZER, HIGH); delay(50); digitalWrite(PIN_BUZZER, LOW);
     }
     lastArmBtnState = currentBtnState;
     myData.armed = isArmed; 
