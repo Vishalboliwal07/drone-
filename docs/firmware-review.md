@@ -4,7 +4,7 @@
 
 The original root-level `drone.c` and `controller.c` are C++ Arduino programs despite their `.c` extensions. They now live under separate PlatformIO source folders and compile as independent targets:
 
-- `src/drone/main.cpp` is the receiver entry point. `FlightController.cpp` owns its startup and flight loop; PID math and motor mixing/output are in `PidController.*` and `MotorOutput.*`.
+- `src/drone/main.cpp` is the receiver entry point. `FlightController.cpp` owns its startup and flight loop; `SensorManager.*` wraps the IMU and barometer; PID math and motor mixing/output are in `PidController.*` and `MotorOutput.*`.
 - `src/controller/main.cpp` is the remote entry point. `ControllerApp.cpp` owns its inputs, buttons, and ESP-NOW transmission.
 - `include/common/command_packet.hpp` defines the shared, 28-byte packet layout.
 - `include/drone/board_config.hpp` contains the receiver pinout and pulse limits.
@@ -42,7 +42,7 @@ The transmitter code does not match the manual in several important ways. The ma
 
 The reference project has a much broader, well-separated design: a thin `src/main.cpp`; a HAL layer; dedicated sensor, device, controller, mixer, input, telemetry, CLI/MSP, storage, and blackbox modules; and unit tests for control, sensors, input, and motor output. It supports multiple sensor/receiver/ESC protocols and configurable pin maps.
 
-This project is intentionally narrower: two ESP32 boards, a custom ESP-NOW packet, one fixed receiver pinout, LSM6DS3TR-C plus BMP280, and four PWM ESC outputs. The new split adopts the reference's separation of entry points, control math, and motor output without importing its unrelated protocols or hardware abstraction. Useful next improvements are a dedicated sensor abstraction, a versioned and sequenced packet with sender validation, explicit failsafe states and telemetry, battery voltage monitoring, and unit tests for PID, mixing, packet validation, and input mapping.
+This project is intentionally narrower: two ESP32 boards, a custom ESP-NOW packet, one fixed receiver pinout, LSM6DS3TR-C plus BMP280, and four PWM ESC outputs. The new split adopts the reference's separation of entry points, sensors, control math, and motor output without importing its unrelated protocols or hardware abstraction. Useful next improvements are a versioned and sequenced packet with sender validation, explicit failsafe states and telemetry, battery voltage monitoring, and unit tests for PID, mixing, packet validation, and input mapping.
 
 ## Build evidence and flashing status
 

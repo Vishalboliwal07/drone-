@@ -2,11 +2,7 @@
 #include <esp_now.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
-#include <Adafruit_LSM6DS3TRC.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BMP280.h>
 #include <SimpleKalmanFilter.h>
-#include <Wire.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <cmath>
@@ -17,6 +13,7 @@
 #include "FlightController.hpp"
 #include "MotorOutput.hpp"
 #include "PidController.hpp"
+#include "SensorManager.hpp"
 
 // ================= HARDWARE CONFIGURATION =================
 #define PIN_POWER_LATCH drone::board::powerLatch
@@ -46,8 +43,7 @@ int TRIM_RR = 0;
 #define ALT_MAX_LIMIT drone::board::maxAltitudeMeters
 
 // ================= OBJECTS =================
-Adafruit_LSM6DS3TRC lsm6ds;
-Adafruit_BMP280 bmp; 
+SensorManager sensors;
 SimpleKalmanFilter gyroXFilter(1, 1, 0.02);
 SimpleKalmanFilter gyroYFilter(1, 1, 0.02);
 SimpleKalmanFilter gyroZFilter(1, 0, 0.02);
@@ -106,15 +102,6 @@ bool setupESPNow() {
 }
 
 float expoMovingAverage(float current, float previous, float alpha = 0.3464) { return alpha * previous + (1 - alpha) * current; }
-bool setupIMU() {
-    if (!lsm6ds.begin_I2C(0x6A)) return false;
-    lsm6ds.setAccelRange(LSM6DS_ACCEL_RANGE_8_G); 
-    lsm6ds.setGyroRange(LSM6DS_GYRO_RANGE_1000_DPS);
-    lsm6ds.setAccelDataRate(LSM6DS_RATE_208_HZ); 
-    lsm6ds.setGyroDataRate(LSM6DS_RATE_208_HZ);
-    return bmp.begin(0x76);
-}
-
 bool setupMotors() { return motors.begin(); }
 
 void flightTask(void *p) {
@@ -125,10 +112,10 @@ void flightTask(void *p) {
     float accSumX=0, accSumY=0, accSumZ=0;
     uint16_t imuSamples = 0;
     for (int i=0; i<300; i++) { 
-        sensors_event_t accel, gyro, temp;
-        if(lsm6ds.getEvent(&accel, &gyro, &temp)) {
-            gyroBiasX += gyro.gyro.x; gyroBiasY += gyro.gyro.y; gyroBiasZ += gyro.gyro.z;
-            accSumX += accel.acceleration.x; accSumY += accel.acceleration.y; accSumZ += accel.acceleration.z;
+        SensorReadings readings{};
+        if (sensors.read(readings)) {
+            gyroBiasX += readings.gyroX; gyroBiasY += readings.gyroY; gyroBiasZ += readings.gyroZ;
+            accSumX += readings.accelX; accSumY += readings.accelY; accSumZ += readings.accelZ;
             ++imuSamples;
         }
         vTaskDelay(2);
@@ -149,12 +136,12 @@ void flightTask(void *p) {
     // --- BARO CALIBRATION ---
     float pressSum = 0;
     for(int i=0; i<100; i++) {
-        bmp.readAltitude(SEALEVEL_PRESSURE_HPA);
+        sensors.altitudeMeters(SEALEVEL_PRESSURE_HPA);
         vTaskDelay(10);
     }
     uint16_t barometerSamples = 0;
     for(int i=0; i<100; i++) {
-        const float altitude = bmp.readAltitude(SEALEVEL_PRESSURE_HPA);
+        const float altitude = sensors.altitudeMeters(SEALEVEL_PRESSURE_HPA);
         if (std::isfinite(altitude)) {
             pressSum += altitude;
             ++barometerSamples;
@@ -225,21 +212,12 @@ void flightTask(void *p) {
             vTaskSuspend(nullptr);
         }
 
-        sensors_event_t accel, gyro, temp;
-        if (lsm6ds.getEvent(&accel, &gyro, &temp)) { 
-            if (!std::isfinite(accel.acceleration.x) || !std::isfinite(accel.acceleration.y) ||
-                !std::isfinite(accel.acceleration.z) || !std::isfinite(gyro.gyro.x) ||
-                !std::isfinite(gyro.gyro.y) || !std::isfinite(gyro.gyro.z)) {
-                state.armed = false;
-                state.safetyLatched = true;
-                motors.stop();
-                vTaskDelayUntil(&xLastTick, pdMS_TO_TICKS(5));
-                continue;
-            }
+        SensorReadings readings{};
+        if (sensors.read(readings)) {
             // 1. Gyro Calculations
-            float gx = (gyro.gyro.x - gyroBiasX) * 57.2958;
-            float gy = (gyro.gyro.y - gyroBiasY) * 57.2958;
-            float gz = (gyro.gyro.z - gyroBiasZ) * 57.2958;
+            float gx = (readings.gyroX - gyroBiasX) * 57.2958;
+            float gy = (readings.gyroY - gyroBiasY) * 57.2958;
+            float gz = (readings.gyroZ - gyroBiasZ) * 57.2958;
             float f_gx = expoMovingAverage(gx, imu_roll_dot_prev);  
             float f_gy = expoMovingAverage(gy, imu_pitch_dot_prev); 
             float f_gz = expoMovingAverage(gz, imu_yaw_dot_prev);   
@@ -249,9 +227,9 @@ void flightTask(void *p) {
             imu_roll_dot_prev=k_gx; imu_pitch_dot_prev=k_gy; imu_yaw_dot_prev=k_gz;
 
             // 2. Accel Calculations
-            float calAccX = accel.acceleration.x - accelBiasX;
-            float calAccY = accel.acceleration.y - accelBiasY;
-            float calAccZ = accel.acceleration.z - accelBiasZ;
+            float calAccX = readings.accelX - accelBiasX;
+            float calAccY = readings.accelY - accelBiasY;
+            float calAccZ = readings.accelZ - accelBiasZ;
             float accRoll  = atan2f(calAccY, calAccZ) * 57.2958f - rollOffsetDeg;
             float accPitch = atanf(-calAccX / sqrtf(calAccY*calAccY + calAccZ*calAccZ)) * 57.2958f - pitchOffsetDeg;
             
@@ -270,7 +248,7 @@ void flightTask(void *p) {
             }
 
             // --- ALTITUDE LOGIC ---
-            float absAlt = bmp.readAltitude(SEALEVEL_PRESSURE_HPA);
+            float absAlt = sensors.altitudeMeters(SEALEVEL_PRESSURE_HPA);
             if (!std::isfinite(absAlt)) {
                 state.armed = false;
                 state.safetyLatched = true;
@@ -375,13 +353,13 @@ void flightControllerSetup() {
     for(int i=0; i<3; i++) { digitalWrite(PIN_LED1, HIGH); digitalWrite(PIN_LED2, HIGH); delay(100); digitalWrite(PIN_LED1, LOW); digitalWrite(PIN_LED2, LOW); delay(100); }
     pinMode(21, INPUT_PULLUP); pinMode(22, OUTPUT);
     for(int i=0; i<8; i++) { digitalWrite(22, LOW); delayMicroseconds(5); digitalWrite(22, HIGH); delayMicroseconds(5); }
-    pinMode(22, INPUT); Wire.begin(); Wire.setTimeOut(3000); 
+    pinMode(22, INPUT);
     if (!setupMotors()) {
         Serial.println("Motor PWM initialization failed; motors remain stopped.");
         motors.stop();
         return;
     }
-    if (!setupIMU()) {
+    if (!sensors.begin()) {
         Serial.println("IMU or barometer initialization failed; motors remain stopped.");
         state.safetyLatched = true;
         return;

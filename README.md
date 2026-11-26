@@ -27,7 +27,7 @@ Replace `COMx` with the USB serial port for the board connected at that time. Ea
 ```text
 include/common/command_packet.hpp  Shared ESP-NOW packet layout
 include/drone/board_config.hpp     Receiver pin and motor settings
-src/drone/                          Receiver entry point, flight loop, PID, motor output
+src/drone/                          Receiver loop, sensor manager, PID, motor output
 src/controller/                     Remote controller entry point and input/radio logic
 esp-fc-master/                      Reference flight-controller project
 ```
