@@ -1,0 +1,5 @@
+.pio/
+.uv-cache/
+.vscode/
+*.elf
+*.hex

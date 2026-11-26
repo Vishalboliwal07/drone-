@@ -1,6 +1,10 @@
 #include <esp_now.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <cstring>
+
+#include "common/command_packet.hpp"
+#include "ControllerApp.hpp"
 
 // ================= HARDWARE CONFIGURATION =================
 uint8_t droneMacAddress[] = {0x68, 0x25, 0xDD, 0xCC, 0x9E, 0xD4}; 
@@ -29,17 +33,8 @@ uint8_t droneMacAddress[] = {0x68, 0x25, 0xDD, 0xCC, 0x9E, 0xD4};
 
 // =========================================================
 
-typedef struct struct_message {
-    int throttle;
-    int yaw;
-    int pitch;
-    int roll;
-    bool armed;
-    int flightMode; 
-    int yawBias; 
-} struct_message;
-
-struct_message myData;
+using struct_message = CommandPacket;
+struct_message myData{};
 esp_now_peer_info_t peerInfo;
 
 // Logic Variables
@@ -86,7 +81,7 @@ int mapJoystick(int val, int centerVal, int minOut, int maxOut) {
     return (int)(curve * range);
 }
 
-void setup() {
+void controllerSetup() {
     Serial.begin(115200);
     
     pinMode(PIN_BUZZER, OUTPUT); digitalWrite(PIN_BUZZER, LOW); 
@@ -140,7 +135,7 @@ void setup() {
     Serial.println("Ready. Mode 1.");
 }
 
-void loop() {
+void controllerLoop() {
     // === S10 LOGIC (Power & Mode) ===
     if (digitalRead(PIN_POWER) == LOW) {
         if (!buttonActive) { 
@@ -269,7 +264,10 @@ void loop() {
 
     bool currentBtnState = digitalRead(PIN_ARM);
     if (lastArmBtnState == HIGH && currentBtnState == LOW) {
-        isArmed = !isArmed; digitalWrite(PIN_BUZZER, HIGH); delay(50); digitalWrite(PIN_BUZZER, LOW);
+        if (isArmed || myData.throttle <= 50) {
+            isArmed = !isArmed;
+            digitalWrite(PIN_BUZZER, HIGH); delay(50); digitalWrite(PIN_BUZZER, LOW);
+        }
     }
     lastArmBtnState = currentBtnState;
     myData.armed = isArmed; 

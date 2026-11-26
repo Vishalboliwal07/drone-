@@ -1,22 +1,27 @@
+#include <Arduino.h>
 #include <esp_now.h>
 #include <WiFi.h>
-#include <esp_wifi.h> 
+#include <esp_wifi.h>
 #include <Adafruit_LSM6DS3TRC.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP280.h>
-#include <Arduino.h>
 #include <SimpleKalmanFilter.h>
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <cmath>
+#include <cstring>
+
+#include "common/command_packet.hpp"
+#include "drone/board_config.hpp"
+#include "FlightController.hpp"
+#include "MotorOutput.hpp"
+#include "PidController.hpp"
 
 // ================= HARDWARE CONFIGURATION =================
-#define PIN_POWER_LATCH   4   
-#define PIN_LED1          18  
-#define PIN_LED2          19  
-
-#define MOTOR_FL 12  
-#define MOTOR_RL 13  
-#define MOTOR_RR 14  
-#define MOTOR_FR 15  
+#define PIN_POWER_LATCH drone::board::powerLatch
+#define PIN_LED1 drone::board::led1
+#define PIN_LED2 drone::board::led2
 
 // ================= MANUAL MOTOR TRIMS =================
 int TRIM_FL = 0;
@@ -27,18 +32,18 @@ int TRIM_RR = 0;
 // ================= SETTINGS =================
 #undef CONFIG_FREERTOS_HZ
 #define CONFIG_FREERTOS_HZ 1000 
-#define PWM_FREQ 416
-#define PWM_RES 10
-#define MIN_PULSE 1000
-#define MAX_PULSE 2000
+#define PWM_FREQ drone::board::pwmFrequencyHz
+#define PWM_RES drone::board::pwmResolutionBits
+#define MIN_PULSE drone::board::minPulseUs
+#define MAX_PULSE drone::board::maxPulseUs
 
 #define D_TERM_FILTER_FREQ  60.0f 
 #define ROLL_PITCH_FF  0.8f 
 #define YAW_FF         0.5f
 
 // --- Altitude Settings ---
-#define SEALEVEL_PRESSURE_HPA 1013.25f
-#define ALT_MAX_LIMIT 10.0f
+#define SEALEVEL_PRESSURE_HPA drone::board::seaLevelPressureHpa
+#define ALT_MAX_LIMIT drone::board::maxAltitudeMeters
 
 // ================= OBJECTS =================
 Adafruit_LSM6DS3TRC lsm6ds;
@@ -51,15 +56,15 @@ SimpleKalmanFilter roll_filter(0.1, 0.1, 0.01);
 
 SimpleKalmanFilter pressureKalman(2, 2, 0.08);
 
-typedef struct { float Kp, Ki, Kd, Kff; float integral; float prevError; float prevMeasurement; float prevDerivative; } PID_Controller;
 typedef struct { float rollAngle, pitchAngle, yawAngle; } Orientation;
-typedef struct State { volatile bool armed; volatile bool calibrating; volatile int throttle; volatile int pitch; volatile int roll; volatile int yaw; } State;
-typedef struct struct_message { int throttle; int yaw; int pitch; int roll; bool armed; int flightMode; int yawBias; } struct_message;
+typedef struct State { volatile bool armed; volatile bool calibrating; volatile bool safetyLatched; volatile int throttle; volatile int pitch; volatile int roll; volatile int yaw; } State;
 
-struct_message incomingData;
+CommandPacket incomingData;
 State state;
 Orientation orientation = {0.0, 0.0, 0.0};
-PID_Controller rollPID, pitchPID, yawPID, altPID; 
+PidController rollPID, pitchPID, yawPID, altPID;
+MotorOutput motors;
+QueueHandle_t commandQueue = nullptr;
 
 float accelBiasX=0, accelBiasY=0, accelBiasZ=0;
 float gyroBiasX=0, gyroBiasY=0, gyroBiasZ=0;
@@ -68,6 +73,7 @@ float dt=0.005;
 unsigned long lastRecvTime = 0;
 unsigned long ledTimer = 0;
 bool ledState = false;
+volatile bool shutdownRequested = false;
 
 float groundReferenceAlt = 0;
 float filteredAltitude = 0;
@@ -77,115 +83,39 @@ int lastThrottleReading = 0;
 
 // ================= CALLBACK =================
 void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *incomingDataPtr, int len) {
-    memcpy(&incomingData, incomingDataPtr, sizeof(incomingData));
-    state.throttle = incomingData.throttle;
-    state.yaw      = incomingData.yaw;
-    state.pitch    = incomingData.pitch;
-    state.roll     = incomingData.roll;
-    
-    if (incomingData.flightMode == 99) {
-        digitalWrite(PIN_POWER_LATCH, LOW); 
-        while(1); 
-    }
-
-    if (!incomingData.armed) state.armed = false;
-    else state.armed = true;
-    lastRecvTime = millis();
+    (void)info;
+    if (incomingDataPtr == nullptr || len != static_cast<int>(sizeof(incomingData))) return;
+    CommandPacket packet{};
+    memcpy(&packet, incomingDataPtr, sizeof(packet));
+    if (packet.throttle < 0 || packet.throttle > 1000 ||
+        packet.yaw < -200 || packet.yaw > 200 ||
+        packet.pitch < -200 || packet.pitch > 200 ||
+        packet.roll < -200 || packet.roll > 200 ||
+        (packet.flightMode != 0 && packet.flightMode != 1 && packet.flightMode != 99)) return;
+    if (commandQueue != nullptr) xQueueOverwrite(commandQueue, &packet);
 }
 
 // ================= HELPERS =================
-void setupESPNow() {
+bool setupESPNow() {
     WiFi.mode(WIFI_STA);
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);
-    if (esp_now_init() != ESP_OK) return;
-    esp_now_register_recv_cb(OnDataRecv); 
+    if (esp_now_init() != ESP_OK) return false;
+    return esp_now_register_recv_cb(OnDataRecv) == ESP_OK;
 }
 
 float expoMovingAverage(float current, float previous, float alpha = 0.3464) { return alpha * previous + (1 - alpha) * current; }
-uint32_t pulseToDuty(int pulseWidth) { return (pulseWidth * 1024) / 2404; }
-
-void setupIMU() {
-    if (!lsm6ds.begin_I2C(0x6A)) { if(!lsm6ds.begin_I2C()) {} } 
+bool setupIMU() {
+    if (!lsm6ds.begin_I2C(0x6A)) return false;
     lsm6ds.setAccelRange(LSM6DS_ACCEL_RANGE_8_G); 
     lsm6ds.setGyroRange(LSM6DS_GYRO_RANGE_1000_DPS);
     lsm6ds.setAccelDataRate(LSM6DS_RATE_208_HZ); 
     lsm6ds.setGyroDataRate(LSM6DS_RATE_208_HZ);
-    bmp.begin(0x76); 
+    return bmp.begin(0x76);
 }
 
-void setupMotors() {
-    ledcAttach(MOTOR_FL, PWM_FREQ, PWM_RES); ledcAttach(MOTOR_FR, PWM_FREQ, PWM_RES);
-    ledcAttach(MOTOR_RL, PWM_FREQ, PWM_RES); ledcAttach(MOTOR_RR, PWM_FREQ, PWM_RES);
-    ledcWrite(MOTOR_FL, pulseToDuty(MIN_PULSE)); ledcWrite(MOTOR_FR, pulseToDuty(MIN_PULSE));
-    ledcWrite(MOTOR_RL, pulseToDuty(MIN_PULSE)); ledcWrite(MOTOR_RR, pulseToDuty(MIN_PULSE));
-}
-
-void initPID(PID_Controller *pid, float Kp, float Ki, float Kd, float Kff) {
-    pid->Kp = Kp; pid->Ki = Ki; pid->Kd = Kd; pid->Kff = Kff;
-    pid->integral = 0; pid->prevError = 0; pid->prevMeasurement = 0; pid->prevDerivative = 0;
-}
-
-float getFilterAlpha(float cutoff_freq, float dt) {
-    float rc = 1.0f / (2.0f * PI * cutoff_freq);
-    return dt / (dt + rc);
-}
-
-float updatePID(PID_Controller *pid, float setpoint, float measurement, float dt) {
-    float error = setpoint - measurement;
-    float P = pid->Kp * error;
-    
-    // Safety: Only accumulate I-term if throttle is high enough (prevent windup on ground)
-    if (state.throttle > 50) { 
-        pid->integral += error * pid->Ki * dt;
-        pid->integral = constrain(pid->integral, -150, 150); 
-    } else {
-        pid->integral = 0; 
-    }
-    
-    float I = pid->integral;
-    float deltaMeasurement = (measurement - pid->prevMeasurement);
-    if (dt <= 0) dt = 0.005; 
-    float rawDerivative = deltaMeasurement / dt;
-    float alpha = getFilterAlpha(D_TERM_FILTER_FREQ, dt);
-    float D_Filtered = alpha * (rawDerivative) + (1.0f - alpha) * pid->prevDerivative;
-    pid->prevMeasurement = measurement;
-    pid->prevDerivative = D_Filtered;
-    float D = -(pid->Kd * D_Filtered);
-    float FF = pid->Kff * setpoint;
-    float output = P + I + D + FF;
-    return constrain(output, -300, 300); 
-}
-
-void updateMotors(int basePulse, float rollOut, float pitchOut, float yawOut) {
-    if (state.armed && !state.calibrating) {
-        int fl, fr, rl, rr;
-        if (incomingData.flightMode == 0) {
-            fl = basePulse + rollOut - pitchOut - yawOut; 
-            fr = basePulse - rollOut - pitchOut + yawOut; 
-            rl = basePulse + rollOut + pitchOut + yawOut; 
-            rr = basePulse - rollOut + pitchOut - yawOut; 
-        } else {
-            float correctedYaw = yawOut + incomingData.yawBias;
-            float yaw_FL = (correctedYaw < 0) ? -correctedYaw : 0;
-            float yaw_FR = (correctedYaw > 0) ?  correctedYaw : 0;
-            float yaw_RL = (correctedYaw > 0) ?  correctedYaw : 0;
-            float yaw_RR = (correctedYaw < 0) ? -correctedYaw : 0;
-
-            fl = basePulse + rollOut - pitchOut + yaw_FL; 
-            fr = basePulse - rollOut - pitchOut + yaw_FR; 
-            rl = basePulse + rollOut + pitchOut + yaw_RL; 
-            rr = basePulse - rollOut + pitchOut + yaw_RR; 
-        }
-        fl += TRIM_FL; fr += TRIM_FR; rl += TRIM_RL; rr += TRIM_RR;
-        fl = constrain(fl, MIN_PULSE, MAX_PULSE); fr = constrain(fr, MIN_PULSE, MAX_PULSE); rl = constrain(rl, MIN_PULSE, MAX_PULSE); rr = constrain(rr, MIN_PULSE, MAX_PULSE);
-        ledcWrite(MOTOR_FL, pulseToDuty(fl)); ledcWrite(MOTOR_FR, pulseToDuty(fr)); ledcWrite(MOTOR_RL, pulseToDuty(rl)); ledcWrite(MOTOR_RR, pulseToDuty(rr));
-    } else {
-        ledcWrite(MOTOR_FL, pulseToDuty(MIN_PULSE)); ledcWrite(MOTOR_FR, pulseToDuty(MIN_PULSE));
-        ledcWrite(MOTOR_RL, pulseToDuty(MIN_PULSE)); ledcWrite(MOTOR_RR, pulseToDuty(MIN_PULSE));
-    }
-}
+bool setupMotors() { return motors.begin(); }
 
 void flightTask(void *p) {
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -193,37 +123,60 @@ void flightTask(void *p) {
     
     // --- IMU CALIBRATION ---
     float accSumX=0, accSumY=0, accSumZ=0;
+    uint16_t imuSamples = 0;
     for (int i=0; i<300; i++) { 
         sensors_event_t accel, gyro, temp;
         if(lsm6ds.getEvent(&accel, &gyro, &temp)) {
             gyroBiasX += gyro.gyro.x; gyroBiasY += gyro.gyro.y; gyroBiasZ += gyro.gyro.z;
             accSumX += accel.acceleration.x; accSumY += accel.acceleration.y; accSumZ += accel.acceleration.z;
+            ++imuSamples;
         }
         vTaskDelay(2);
     }
-    gyroBiasX/=300.0; gyroBiasY/=300.0; gyroBiasZ/=300.0;
-    accSumX/=300.0; accSumY/=300.0; accSumZ/=300.0;
+    if (imuSamples < 270) {
+        state.safetyLatched = true;
+        state.calibrating = false;
+        motors.stop();
+        Serial.println("IMU calibration failed; motors remain stopped.");
+        vTaskDelete(nullptr);
+        return;
+    }
+    gyroBiasX/=imuSamples; gyroBiasY/=imuSamples; gyroBiasZ/=imuSamples;
+    accSumX/=imuSamples; accSumY/=imuSamples; accSumZ/=imuSamples;
     pitchOffsetDeg = atan2f(-accSumX, sqrtf(accSumY*accSumY + accSumZ*accSumZ)) * 57.2958f;
     rollOffsetDeg  = atanf(accSumY / accSumZ) * 57.2958f;   
     
     // --- BARO CALIBRATION ---
     float pressSum = 0;
     for(int i=0; i<100; i++) {
-        bmp.readAltitude(SEALEVEL_PRESSURE_HPA); 
+        bmp.readAltitude(SEALEVEL_PRESSURE_HPA);
         vTaskDelay(10);
     }
+    uint16_t barometerSamples = 0;
     for(int i=0; i<100; i++) {
-        pressSum += bmp.readAltitude(SEALEVEL_PRESSURE_HPA);
+        const float altitude = bmp.readAltitude(SEALEVEL_PRESSURE_HPA);
+        if (std::isfinite(altitude)) {
+            pressSum += altitude;
+            ++barometerSamples;
+        }
         vTaskDelay(10);
     }
-    groundReferenceAlt = pressSum / 100.0f;
+    if (barometerSamples < 80) {
+        state.safetyLatched = true;
+        state.calibrating = false;
+        motors.stop();
+        Serial.println("Barometer calibration failed; motors remain stopped.");
+        vTaskDelete(nullptr);
+        return;
+    }
+    groundReferenceAlt = pressSum / barometerSamples;
     
     state.calibrating = false;
 
-    initPID(&rollPID,  1.3f, 0.5f, 0.04f, ROLL_PITCH_FF); 
-    initPID(&pitchPID, 1.3f, 0.5f, 0.04f, ROLL_PITCH_FF);
-    initPID(&yawPID,   1.3f, 0.35f, 0.04f, YAW_FF);
-    initPID(&altPID, 1.2f, 0.20f, 0.25f, 0.0f);
+    rollPID.configure(1.3f, 0.5f, 0.04f, ROLL_PITCH_FF);
+    pitchPID.configure(1.3f, 0.5f, 0.04f, ROLL_PITCH_FF);
+    yawPID.configure(1.3f, 0.35f, 0.04f, YAW_FF);
+    altPID.configure(1.2f, 0.20f, 0.25f, 0.0f);
 
     unsigned long time_now = micros();
     unsigned long time_prev = time_now;
@@ -233,16 +186,56 @@ void flightTask(void *p) {
     float accelRoll_prev=0, accelPitch_prev=0;
 
     while (1) {
+        CommandPacket receivedPacket{};
+        if (xQueueReceive(commandQueue, &receivedPacket, 0) == pdTRUE) {
+            incomingData = receivedPacket;
+            state.throttle = incomingData.throttle;
+            state.yaw = incomingData.yaw;
+            state.pitch = incomingData.pitch;
+            state.roll = incomingData.roll;
+            lastRecvTime = millis();
+            if (incomingData.flightMode == 99) {
+                shutdownRequested = true;
+                state.armed = false;
+            } else if (!incomingData.armed) {
+                state.armed = false;
+                state.safetyLatched = false;
+            } else if (!state.safetyLatched && !state.armed && state.throttle <= 50) {
+                state.armed = true;
+            }
+        }
         time_now = micros();
         dt = (time_now - time_prev) / 1000000.0f;
         time_prev = time_now;
-        if (dt > 0.1f) dt = 0.005f; 
+        if (!std::isfinite(dt) || dt < 0.0025f || dt > 0.02f) dt = 0.005f;
         
-        if (millis() - lastRecvTime > 60000) { digitalWrite(PIN_POWER_LATCH, LOW); }
-        if (millis() - lastRecvTime > 1000) state.armed = false;
+        if (shutdownRequested) {
+            state.armed = false;
+            motors.stop();
+            digitalWrite(PIN_POWER_LATCH, LOW);
+            vTaskSuspend(nullptr);
+        }
+        if (millis() - lastRecvTime > 1000) {
+            state.armed = false;
+            state.safetyLatched = true;
+        }
+        if (lastRecvTime > 0 && millis() - lastRecvTime > 60000) {
+            motors.stop();
+            digitalWrite(PIN_POWER_LATCH, LOW);
+            vTaskSuspend(nullptr);
+        }
 
         sensors_event_t accel, gyro, temp;
         if (lsm6ds.getEvent(&accel, &gyro, &temp)) { 
+            if (!std::isfinite(accel.acceleration.x) || !std::isfinite(accel.acceleration.y) ||
+                !std::isfinite(accel.acceleration.z) || !std::isfinite(gyro.gyro.x) ||
+                !std::isfinite(gyro.gyro.y) || !std::isfinite(gyro.gyro.z)) {
+                state.armed = false;
+                state.safetyLatched = true;
+                motors.stop();
+                vTaskDelayUntil(&xLastTick, pdMS_TO_TICKS(5));
+                continue;
+            }
             // 1. Gyro Calculations
             float gx = (gyro.gyro.x - gyroBiasX) * 57.2958;
             float gy = (gyro.gyro.y - gyroBiasY) * 57.2958;
@@ -271,13 +264,28 @@ void flightTask(void *p) {
             orientation.rollAngle  = alpha * (orientation.rollAngle + k_gx * dt) + (1.0f - alpha) * k_accRoll;
             orientation.pitchAngle = alpha * (orientation.pitchAngle + k_gy * dt) + (1.0f - alpha) * k_accPitch;
 
-            if (abs(orientation.rollAngle) > 75.0 || abs(orientation.pitchAngle) > 75.0) {
-                state.armed = false; 
+            if (fabsf(orientation.rollAngle) > 75.0f || fabsf(orientation.pitchAngle) > 75.0f) {
+                state.armed = false;
+                state.safetyLatched = true;
             }
 
             // --- ALTITUDE LOGIC ---
             float absAlt = bmp.readAltitude(SEALEVEL_PRESSURE_HPA);
+            if (!std::isfinite(absAlt)) {
+                state.armed = false;
+                state.safetyLatched = true;
+                motors.stop();
+                vTaskDelayUntil(&xLastTick, pdMS_TO_TICKS(5));
+                continue;
+            }
             filteredAltitude = pressureKalman.updateEstimate(absAlt - groundReferenceAlt);
+            if (!std::isfinite(filteredAltitude)) {
+                state.armed = false;
+                state.safetyLatched = true;
+                motors.stop();
+                vTaskDelayUntil(&xLastTick, pdMS_TO_TICKS(5));
+                continue;
+            }
             
             if (abs(state.throttle - lastThrottleReading) < 20) {
                 if (!altitudeHoldActive && state.throttle > 200) { 
@@ -296,10 +304,10 @@ void flightTask(void *p) {
             
             float altPID_Output = 0;
             if (state.armed && altitudeHoldActive) {
-                altPID_Output = updatePID(&altPID, targetAltitude, filteredAltitude, dt);
+                altPID_Output = altPID.update(targetAltitude, filteredAltitude, dt, state.throttle);
                 altPID_Output = constrain(altPID_Output, -200, 200); 
             } else {
-                altPID.integral = 0; 
+                altPID.reset();
                 altPID_Output = 0;
             }
             // ---------------------
@@ -310,9 +318,9 @@ void flightTask(void *p) {
             float targetPitchRate = 4.0f * (targetPitch - orientation.pitchAngle);
             float targetYawRate   = 3.0f * (state.yaw); 
 
-            float rollOut = updatePID(&rollPID, targetRollRate, k_gx, dt);
-            float pitchOut = updatePID(&pitchPID, targetPitchRate, k_gy, dt);
-            float yawOut = updatePID(&yawPID, targetYawRate, k_gz, dt);
+            float rollOut = rollPID.update(targetRollRate, k_gx, dt, state.throttle);
+            float pitchOut = pitchPID.update(targetPitchRate, k_gy, dt, state.throttle);
+            float yawOut = yawPID.update(targetYawRate, k_gz, dt, state.throttle);
             
             // ==========================================
             // --- NEW: THROTTLE PID ADJUSTMENTS START ---
@@ -324,9 +332,9 @@ void flightTask(void *p) {
                 pitchOut = 0;
                 yawOut = 0;
                 // Important: Reset I-terms so they don't accumulate on ground
-                rollPID.integral = 0;
-                pitchPID.integral = 0;
-                yawPID.integral = 0;
+                rollPID.reset();
+                pitchPID.reset();
+                yawPID.reset();
             }
             // 2. HIGH THROTTLE ATTENUATION (Above 80% -> 800)
             // Scales from 100% PID strength at 800 throttle to 80% PID strength at 1000 throttle
@@ -348,13 +356,18 @@ void flightTask(void *p) {
             int basePulse = map(state.throttle, 0, 1000, MIN_PULSE, MAX_PULSE);
             basePulse += (int)altPID_Output;
             
-            updateMotors(basePulse, rollOut, pitchOut, yawOut);
+            motors.write(basePulse, rollOut, pitchOut, yawOut, state.armed,
+                         state.calibrating, incomingData.flightMode, incomingData.yawBias);
+        } else {
+            state.armed = false;
+            state.safetyLatched = true;
+            motors.stop();
         }
         vTaskDelayUntil(&xLastTick, pdMS_TO_TICKS(5));
     }
 }
 
-void setup() {
+void flightControllerSetup() {
     setCpuFrequencyMhz(240);
     Serial.begin(115200);
     pinMode(PIN_POWER_LATCH, OUTPUT); digitalWrite(PIN_POWER_LATCH, HIGH); 
@@ -363,12 +376,34 @@ void setup() {
     pinMode(21, INPUT_PULLUP); pinMode(22, OUTPUT);
     for(int i=0; i<8; i++) { digitalWrite(22, LOW); delayMicroseconds(5); digitalWrite(22, HIGH); delayMicroseconds(5); }
     pinMode(22, INPUT); Wire.begin(); Wire.setTimeOut(3000); 
-    setupMotors(); setupIMU(); setupESPNow(); 
+    if (!setupMotors()) {
+        Serial.println("Motor PWM initialization failed; motors remain stopped.");
+        motors.stop();
+        return;
+    }
+    if (!setupIMU()) {
+        Serial.println("IMU or barometer initialization failed; motors remain stopped.");
+        state.safetyLatched = true;
+        return;
+    }
+    commandQueue = xQueueCreate(1, sizeof(CommandPacket));
+    if (commandQueue == nullptr) {
+        Serial.println("Command queue allocation failed; motors remain stopped.");
+        state.safetyLatched = true;
+        motors.stop();
+        return;
+    }
+    if (!setupESPNow()) {
+        Serial.println("ESP-NOW initialization failed; motors remain stopped.");
+        state.safetyLatched = true;
+        motors.stop();
+        return;
+    }
     Serial.println("System Ready.");
     xTaskCreatePinnedToCore(flightTask, "FlightTask", 20480, NULL, 5, NULL, 1);
 }
 
-void loop() { 
+void flightControllerLoop() {
     if (state.armed) { digitalWrite(PIN_LED1, HIGH); digitalWrite(PIN_LED2, HIGH); } 
     else if (state.calibrating) { if (millis() - ledTimer > 100) { ledTimer = millis(); ledState = !ledState; digitalWrite(PIN_LED1, ledState); digitalWrite(PIN_LED2, !ledState); } }
     else { if (millis() - ledTimer > 500) { ledTimer = millis(); ledState = !ledState; digitalWrite(PIN_LED1, ledState); digitalWrite(PIN_LED2, !ledState); } }
